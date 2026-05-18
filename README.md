@@ -1,56 +1,61 @@
 # flake-analysis-core
 
-Shared algorithm core for 2D material flake microscopy analysis, extracted from
-the [Qpress](https://github.com/HoukJangBNL) distributed hardware control system.
+Algorithm core for 2D material flake microscopy analysis.
 
-## What it is
+Extracted from the [Qpress](https://github.com/HoukJangBNL/Qpress) hardware-control system into a standalone, reusable package. Used by [stand-alone-analyzer](https://github.com/HoukJangBNL/stand-alone-analyzer) (Streamlit GUI).
 
-A pip-installable Python package containing the algorithmic primitives used by
-the flake analysis pipeline:
+## Status
 
-- Background generation (median / mean over raw images)
-- Per-domain color and area statistics
-- Pairwise domain distance + union-find flake construction
-- 5-metric bidirectional selector
-- Manual seed-group GMM clustering (with per-cluster probability thresholds)
-- COCO + RLE annotation IO
+`v0.1.0` — alpha. APIs may change between minor versions.
 
-The package is UI-free, DB-free, and ZMQ-free. It exposes thin functional
-wrappers (`flake_core.pipeline.*`) that take plain arguments and return plain
-dict outputs.
+## What it provides
 
-## Used by
+- **Annotations IO** — COCO + RLE flake mask loading (`flake_core.annotations`)
+- **Image processing** — median background generation (with reproducibility seed) + mask pair distance + union-find flake construction (`flake_core.image_processing`)
+- **Color classification** — per-domain color stats computation (`flake_core.color_classification`)
+- **Manual seed-group GMM clustering** (`flake_core.clustering`)
+- **Function-style pipeline wrappers** — `flake_core.pipeline.{background, domain_stats, domain_proximity, selector, clustering}`
 
-- **Qpress** — the original analyzer module imports from `flake_core` after the
-  M2 migration.
-- **stand-alone-analyzer** — a Streamlit single-user desktop app that depends on
-  `flake_core` and adds disk-SSOT manifest, Plotly visualization, and a
-  6-step pipeline UI.
-
-This package is **not intended for direct end-users**. Use one of the consumer
-applications above.
+No DB, no SSH, no GUI dependencies. Pure Python + numpy + scipy + sklearn + opencv + pycocotools + Pillow.
 
 ## Install
 
 ```bash
-# Development (editable) install
-pip install -e .
-
-# With dev tools (pytest, ruff)
+git clone https://github.com/HoukJangBNL/flake-analysis-core.git
+cd flake-analysis-core
 pip install -e ".[dev]"
-
-# Future: published install (not yet on PyPI)
-pip install flake-analysis-core
+pytest -v
 ```
+
+## Quick example
+
+```python
+from flake_core.pipeline.background import run_background
+from flake_core.pipeline.domain_stats import run_domain_stats
+
+# Generate median background from raw images (reproducible with seed)
+result = run_background(
+    raw_images_dir="/path/to/raw_images",
+    output_path="/path/to/analysis/01_background/background.npy",
+    seed=0,
+    max_images=100,
+)
+
+# Compute per-domain RGB stats
+stats = run_domain_stats(
+    annotations_path="/path/to/annotations.json",
+    raw_images_dir="/path/to/raw_images",
+    background_path="/path/to/analysis/01_background/background.npy",
+    analysis_folder="/path/to/analysis",
+)
+```
+
+See [stand-alone-analyzer](https://github.com/HoukJangBNL/stand-alone-analyzer) for a full Streamlit GUI on top of these functions.
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
 
-## Status
+## Acknowledgements
 
-**Alpha (M0 skeleton)** — version `0.1.0a0`. Algorithm modules are extracted in
-M1; Qpress migration lands in M2; standalone Streamlit app and parity validation
-follow in M3–M4.
-
-See `plan_v1.md` (in the Qpress workspace) for the full roadmap.
+Algorithms adapted from the Qpress analyzer module (BNL/CFN). Credit to the Qpress contributors.

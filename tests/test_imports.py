@@ -5,7 +5,7 @@ from __future__ import annotations
 def test_package_import():
     import flake_core
 
-    assert flake_core.__version__ == "0.1.0a0"
+    assert flake_core.__version__ == "0.1.0"
 
 
 def test_compat_msg_shim():

@@ -29,7 +29,7 @@ from typing import Any, Dict, Optional, Union
 import numpy as np
 import pandas as pd
 
-from flake_core._compat import msg
+from flake_core._compat import ProgressCallback, msg
 
 
 def _hash_params(params: Dict[str, Any]) -> str:
@@ -63,6 +63,7 @@ def run_selector(
     std_b_max: Optional[float] = None,
     sam2_min: Optional[float] = None,
     sam2_max: Optional[float] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Apply the 5-metric bidirectional filter to per-domain stats.
 
@@ -100,6 +101,9 @@ def run_selector(
     msg.info(
         f"[pipeline.selector] start npz={stats_npz_path} out={output_path}"
     )
+
+    if progress_callback is not None:
+        progress_callback(0.0, "Loading stats NPZ...")
 
     npz = np.load(stats_npz_path, allow_pickle=False)
     required = ("std_pcts", "areas", "flake_ids")
@@ -144,6 +148,9 @@ def run_selector(
                 "has no 'sam2' column; ignoring (allow_missing=True)"
             )
 
+    if progress_callback is not None:
+        progress_callback(0.5, "Applying 5-metric filter...")
+
     selected = np.logical_and.reduce(masks)
 
     df = pd.DataFrame(
@@ -159,6 +166,9 @@ def run_selector(
     msg.info(
         f"[pipeline.selector] selected {selected_count}/{total_count} domains -> {output_path}"
     )
+
+    if progress_callback is not None:
+        progress_callback(1.0, "Done")
 
     params: Dict[str, Any] = {
         "stats_npz_path": str(stats_npz_path),

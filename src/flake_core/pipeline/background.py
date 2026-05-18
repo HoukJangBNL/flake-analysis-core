@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional, Union
 
 import numpy as np
 
-from flake_core._compat import msg
+from flake_core._compat import ProgressCallback, msg
 from flake_core.image_processing.background import (
     get_median_background,
     save_background,
@@ -36,6 +36,7 @@ def run_background(
     method: str = "median",
     random_sample: bool = True,
     file_pattern: str = "[!._]*.png",
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Run background generation as a function (no Operation class).
 
@@ -72,6 +73,9 @@ def run_background(
         f"seed={seed} max_images={max_images} method={method}"
     )
 
+    if progress_callback is not None:
+        progress_callback(0.0, "Listing images...")
+
     bg = get_median_background(
         raw_images_dir=raw_images_dir,
         max_images=max_images,
@@ -80,7 +84,11 @@ def run_background(
         gaussian_sigma=gaussian_sigma,
         method=method,
         seed=seed,
+        progress_callback=progress_callback,
     )
+
+    if progress_callback is not None:
+        progress_callback(0.95, "Writing background...")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.suffix.lower() == ".npy":
@@ -88,6 +96,9 @@ def run_background(
         msg.info(f"[pipeline.background] saved ndarray to {output_path}")
     else:
         save_background(bg, output_path)
+
+    if progress_callback is not None:
+        progress_callback(1.0, "Done")
 
     params: Dict[str, Any] = {
         "max_images": max_images,

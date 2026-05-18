@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 from scipy.ndimage import gaussian_filter
 
-from flake_core._compat import msg
+from flake_core._compat import ProgressCallback, msg
 
 
 def get_median_background(
@@ -20,6 +20,7 @@ def get_median_background(
     gaussian_sigma: float = 10.0,
     method: str = "median",
     seed: Optional[int] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> np.ndarray:
     """
     Calculate median background from raw images for vignetting correction.
@@ -105,12 +106,19 @@ def get_median_background(
     # Load all images into memory for median calculation
     total = len(image_files)
     msg.info(f"Loading {total} images for median background...")
+    # Per-image progress emission. Bound the cadence so we don't spam the
+    # callback on tiny inputs (1 emit per ~10% of work, min every image).
+    emit_every = max(1, total // 10)
     images = []
     for i, file in enumerate(image_files):
         img_arr = np.array(Image.open(file))  # uint8 to save memory
         images.append(img_arr)
         if (i + 1) % 20 == 0:
             msg.debug(f"  Loaded {i + 1}/{total} images")
+        if progress_callback is not None and ((i + 1) % emit_every == 0 or (i + 1) == total):
+            # Loading occupies ~70% of the wall-clock for typical inputs.
+            load_pct = 0.7 * float(i + 1) / float(total)
+            progress_callback(load_pct, f"Loaded {i + 1}/{total} images")
     msg.debug(f"  Loaded {total}/{total} images")
 
     # Stack images and compute pixel-wise aggregation
@@ -119,15 +127,21 @@ def get_median_background(
     del images  # Free memory
     if method == "mean":
         msg.info("Computing pixel-wise mean...")
+        if progress_callback is not None:
+            progress_callback(0.75, "Computing pixel-wise mean...")
         result_image = np.mean(stacked, axis=0).astype(np.float64)
     else:
         msg.info("Computing pixel-wise median...")
+        if progress_callback is not None:
+            progress_callback(0.75, "Computing pixel-wise median...")
         result_image = np.median(stacked, axis=0).astype(np.float64)
     del stacked  # Free memory
 
     # Apply Gaussian smoothing to reduce noise
     if gaussian_sigma and gaussian_sigma > 0:
         msg.debug(f"Applying Gaussian smoothing (sigma={gaussian_sigma})...")
+        if progress_callback is not None:
+            progress_callback(0.9, f"Applying Gaussian smoothing (sigma={gaussian_sigma})...")
         if result_image.ndim == 3:
             for c in range(result_image.shape[2]):
                 result_image[:, :, c] = gaussian_filter(result_image[:, :, c], sigma=gaussian_sigma)

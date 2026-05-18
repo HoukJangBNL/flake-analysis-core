@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flake-analysis-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "Algorithm core for 2D material flake microscopy analysis (extracted from Qpress)"
 readme = "README.md"
 license = "MIT"

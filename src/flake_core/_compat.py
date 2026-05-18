@@ -20,6 +20,18 @@ from typing import Any, Callable, Dict, Optional
 _logger = logging.getLogger("flake_core")
 
 
+# --- ProgressCallback type alias --------------------------------------------
+# Single canonical signature for progress reporting across the pipeline:
+#   cb(pct, message)
+# - pct: float in [0.0, 1.0] (monotonic non-decreasing per call site)
+# - message: short human-readable status string
+#
+# Always optional with a default of ``None`` in the pipeline wrappers, so
+# existing call sites that don't care about progress remain backward
+# compatible. New in v0.2.0.
+ProgressCallback = Callable[[float, str], None]
+
+
 class _Msg:
     """Minimal subset of Qpress's msg API. Only the methods extracted code uses."""
 

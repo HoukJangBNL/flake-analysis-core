@@ -24,12 +24,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 import numpy as np
 from PIL import Image
 
-from flake_core._compat import msg
+from flake_core._compat import ProgressCallback, msg
 from flake_core.annotations import AnnotationsCache, load_flakes_from_annotations
 from flake_core.color_classification.loader import compute_and_cache_stats_from_flakes
 
@@ -50,6 +50,7 @@ def run_domain_stats(
     analysis_folder: Union[str, Path],
     repr_mode: str = "median",
     raw_ext: str = ".png",
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Compute per-domain color stats and write the NPZ artifact.
 
@@ -116,6 +117,9 @@ def run_domain_stats(
         f"out={output_path} repr_mode={repr_mode}"
     )
 
+    if progress_callback is not None:
+        progress_callback(0.0, "Loading annotations + raw images...")
+
     # --- Resolve annotations layout --------------------------------------
     # AnnotationsCache.load() expects:
     #   annotations.json at: {analysis_dir}/{analysis_type}/annotations.json
@@ -148,6 +152,9 @@ def run_domain_stats(
     flakes = load_flakes_from_annotations(cache, raw_images_dir, raw_ext=raw_ext)
     msg.info(f"[pipeline.domain_stats] loaded {len(flakes)} flakes")
 
+    if progress_callback is not None:
+        progress_callback(0.3, f"Loaded {len(flakes)} flakes; reading background...")
+
     # --- Load explicit background image ----------------------------------
     if background_path.suffix.lower() == ".npy":
         background_image = np.load(background_path).astype(np.float64)
@@ -155,8 +162,22 @@ def run_domain_stats(
         background_image = np.array(Image.open(background_path)).astype(np.float64)
     msg.info(f"[pipeline.domain_stats] using background from {background_path}")
 
+    if progress_callback is not None:
+        progress_callback(0.5, "Computing stats per flake group...")
+
     # --- Compute (writes Qpress-compatible NPZ inside cache_dir) ---------
     cache_dir = output_path.parent
+
+    # Adapter: ``compute_and_cache_stats_from_flakes`` reports progress as
+    # ``(current, total, message)`` while our public callback is ``(pct, message)``.
+    # Map the inner progress into the 0.5 .. 0.9 band of the wrapper's wall-clock.
+    inner_cb = None
+    if progress_callback is not None:
+        def inner_cb(current: int, total: int, message: str) -> None:
+            denom = float(total) if total else 1.0
+            inner_pct = max(0.0, min(1.0, float(current) / denom))
+            outer_pct = 0.5 + 0.4 * inner_pct
+            progress_callback(outer_pct, message)
 
     result = compute_and_cache_stats_from_flakes(
         flakes=flakes,
@@ -167,7 +188,11 @@ def run_domain_stats(
         force_recompute=True,  # wrapper always writes fresh artifact
         raw_ext=raw_ext,
         background_image=background_image,
+        progress_callback=inner_cb,
     )
+
+    if progress_callback is not None:
+        progress_callback(0.9, "Writing NPZ...")
 
     # ``compute_and_cache_stats_from_flakes`` writes
     #   cache_dir/flake_stats_median_<repr>.npz
@@ -184,6 +209,9 @@ def run_domain_stats(
     msg.info(
         f"[pipeline.domain_stats] wrote {len(flake_ids)} domain rows to {output_path}"
     )
+
+    if progress_callback is not None:
+        progress_callback(1.0, "Done")
 
     params: Dict[str, Any] = {
         "annotations_path": str(annotations_path),

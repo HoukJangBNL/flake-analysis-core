@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 
-from flake_core._compat import msg
+from flake_core._compat import ProgressCallback, msg
 from flake_core.image_processing.pair_distance import (
     process_image,
     union_find_islands,
@@ -66,6 +66,7 @@ def run_domain_proximity(
     link_distance_um: Optional[float] = None,
     pixel_size_um: float = 0.5,
     workers: int = 4,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Run pair distance computation followed by union-find flake construction.
 
@@ -109,6 +110,9 @@ def run_domain_proximity(
         f"out={output_dir} r_max_px={r_max_px} pixel_size_um={pixel_size_um}"
     )
 
+    if progress_callback is not None:
+        progress_callback(0.0, "Loading annotations...")
+
     coco = _load_annotations(annotations_path)
     grouped, images_meta = _group_annotations_by_image(coco)
 
@@ -138,7 +142,11 @@ def run_domain_proximity(
         )
         return pairs
 
-    # Run per-image pair computation in parallel.
+    # Run per-image pair computation in parallel. The pair-distance phase
+    # spans 0% .. 0.9 (90% of the wrapper time budget); the union-find at the
+    # end occupies the remaining 0.9 .. 1.0.
+    n_total_images = max(1, len(grouped))
+    n_done = 0
     if workers and workers > 1 and len(grouped) > 1:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
@@ -146,12 +154,33 @@ def run_domain_proximity(
                 for img_id, anns in grouped.items()
             }
             for fut in as_completed(futures):
-                pairs_global.extend(fut.result())
+                img_pairs = fut.result()
+                pairs_global.extend(img_pairs)
+                n_done += 1
+                if progress_callback is not None:
+                    pct = 0.9 * float(n_done) / float(n_total_images)
+                    progress_callback(
+                        pct,
+                        f"Processed image {n_done}/{n_total_images} "
+                        f"(+{len(img_pairs)} pairs)",
+                    )
     else:
         for img_id, anns in grouped.items():
-            pairs_global.extend(_do_image(img_id, anns))
+            img_pairs = _do_image(img_id, anns)
+            pairs_global.extend(img_pairs)
+            n_done += 1
+            if progress_callback is not None:
+                pct = 0.9 * float(n_done) / float(n_total_images)
+                progress_callback(
+                    pct,
+                    f"Processed image {n_done}/{n_total_images} "
+                    f"(+{len(img_pairs)} pairs)",
+                )
 
     pairs_global.sort(key=lambda p: (p[0], p[1]))
+
+    if progress_callback is not None:
+        progress_callback(0.95, "Building flake assignments via union-find...")
 
     # Persist distances.parquet (with both px and um).
     distances_path = output_dir / "distances.parquet"
@@ -192,6 +221,9 @@ def run_domain_proximity(
         f"[pipeline.domain_proximity] wrote {len(flake_df)} domain rows / "
         f"{len(flakes)} flakes to {flake_assignments_path}"
     )
+
+    if progress_callback is not None:
+        progress_callback(1.0, "Done")
 
     params: Dict[str, Any] = {
         "r_max_px": r_max_px,

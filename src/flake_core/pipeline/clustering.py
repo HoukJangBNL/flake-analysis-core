@@ -34,12 +34,12 @@ import json
 import pickle
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
 
-from flake_core._compat import msg
+from flake_core._compat import ProgressCallback, msg
 from flake_core.clustering.engine import (
     InteractiveClusterResult,
     InteractiveClusteringEngine,
@@ -106,6 +106,7 @@ def run_clustering(
     rgb_threshold: float = 0.5,
     max_iter: int = 100,
     tol: float = 1e-4,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Fit GMM with manual seed groups and persist labels + model.
 
@@ -151,6 +152,9 @@ def run_clustering(
         f"selection={selection_parquet_path} n_groups={len(seed_groups)} "
         f"random_state=42"
     )
+
+    if progress_callback is not None:
+        progress_callback(0.1, "Loading stats NPZ...")
 
     # --- Load stats + selection ------------------------------------------
     npz = np.load(stats_npz_path, allow_pickle=False)
@@ -206,11 +210,17 @@ def run_clustering(
         f"[pipeline.clustering] selected subset: {repr_rgbs_sel.shape[0]} domains"
     )
 
+    if progress_callback is not None:
+        progress_callback(0.3, "Building seed-group positional indices...")
+
     # --- Positional-index adapter (D6.2) ---------------------------------
     positional_groups, n_dropped_seed_ids = _build_positional_seed_groups(
         seed_groups, selected_domain_ids
     )
     seed_indices_only = [grp["indices"] for grp in positional_groups]
+
+    if progress_callback is not None:
+        progress_callback(0.5, f"Fitting GMM (max_iter={max_iter})...")
 
     # --- Fit GMM ---------------------------------------------------------
     engine = InteractiveClusteringEngine()
@@ -222,6 +232,9 @@ def run_clustering(
         tol=tol,
     )
 
+    if progress_callback is not None:
+        progress_callback(0.8, "Computing posteriors...")
+
     # --- Persist outputs -------------------------------------------------
     assignments_df = pd.DataFrame(
         {
@@ -232,6 +245,9 @@ def run_clustering(
     )
     assignments_path = output_dir / "assignments.parquet"
     assignments_df.to_parquet(assignments_path, engine="pyarrow", index=False)
+
+    if progress_callback is not None:
+        progress_callback(0.95, "Writing labels.json + assignments.parquet...")
 
     n_assigned = int((result.labels >= 0).sum())
     n_unassigned = int((result.labels == -1).sum())
@@ -296,6 +312,9 @@ def run_clustering(
         f"dropped_seed_ids={n_dropped_seed_ids}, "
         f"dropped_selected_ids={n_dropped_selected_ids})"
     )
+
+    if progress_callback is not None:
+        progress_callback(1.0, "Done")
 
     params: Dict[str, Any] = {
         "stats_npz_path": str(stats_npz_path),

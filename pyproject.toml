@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flake-analysis-core"
+version = "0.1.0a0"
+description = "Algorithm core for 2D material flake microscopy analysis (extracted from Qpress)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Qpress Contributors" }
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+dependencies = [
+    "numpy>=1.24",
+    "Pillow>=10",
+    "scipy>=1.11",
+    "opencv-python>=4.8",
+    "pycocotools>=2.0",
+    "scikit-learn>=1.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/HoukJangBNL/flake-analysis-core"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flake_core"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

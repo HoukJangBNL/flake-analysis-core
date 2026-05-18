@@ -1,8 +1,15 @@
-"""End-to-end test for the run_clustering wrapper (positional-index adapter)."""
+"""End-to-end test for the run_clustering wrapper (positional-index adapter).
+
+Plan v1 r7 additions:
+  * Diagnostic counters ``n_dropped_seed_ids`` / ``n_dropped_selected_ids``
+    must surface in the result dict.
+  * ``labels.json`` schema is frozen per plan §7.1.
+"""
 from __future__ import annotations
 
 import json
 import pickle
+import re
 import tempfile
 from pathlib import Path
 
@@ -91,11 +98,19 @@ def test_run_clustering_two_blobs_separates_correctly():
         assert isinstance(loaded, InteractiveClusterResult)
         assert loaded.n_clusters == 2
 
-        # labels.json shape sanity.
+        # labels.json shape sanity (plan v1 r7 §7.1 frozen schema).
         labels_payload = json.loads((out_dir / "labels.json").read_text())
+        assert labels_payload["version"] == 1
         assert labels_payload["n_clusters"] == 2
-        assert labels_payload["n_selected"] == 100
-        assert len(labels_payload["cluster_centers"]) == 2
+        assert len(labels_payload["groups"]) == 2
+        assert labels_payload["noise_label"] == -1
+        assert labels_payload["random_state"] == 42
+        # All 100 well-separated points should be assigned.
+        assert len(labels_payload["assignments"]) == 100
+
+        # No mapping fallout in the well-formed input.
+        assert result["n_dropped_seed_ids"] == 0
+        assert result["n_dropped_selected_ids"] == 0
 
 
 def test_run_clustering_handles_partial_selection():
@@ -165,3 +180,148 @@ def test_run_clustering_warns_on_seed_outside_selection():
             rgb_threshold=0.5,
         )
         assert result["n_clusters"] == 2
+        # Plan v1 r7: dropped seed ids surface in the diagnostic counter.
+        assert result["n_dropped_seed_ids"] == 2
+        # No selected domain_id is missing from the NPZ in this fixture.
+        assert result["n_dropped_selected_ids"] == 0
+
+
+def test_run_clustering_diagnostic_counters_present():
+    """Result dict carries r7 mapping-diagnostic counters even on the happy path."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        npz_path = tmp / "stats.npz"
+        sel_path = tmp / "selection.parquet"
+        out_dir = tmp / "clustering_out"
+
+        _make_two_blob_npz(npz_path)
+        _make_all_selected_parquet(sel_path, n=100)
+
+        seed_groups = [
+            {"name": "dark", "domain_ids": [0, 1, 2]},
+            {"name": "light", "domain_ids": [50, 51, 52]},
+        ]
+
+        result = run_clustering(
+            npz_path,
+            sel_path,
+            seed_groups,
+            output_dir=out_dir,
+            rgb_threshold=0.5,
+        )
+        assert "n_dropped_seed_ids" in result
+        assert "n_dropped_selected_ids" in result
+        assert result["n_dropped_seed_ids"] == 0
+        assert result["n_dropped_selected_ids"] == 0
+
+
+def test_run_clustering_counts_selected_ids_missing_from_npz():
+    """Selected domain_ids absent from the stats NPZ are counted, not fatal."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        npz_path = tmp / "stats.npz"
+        sel_path = tmp / "selection.parquet"
+        out_dir = tmp / "clustering_out"
+
+        _make_two_blob_npz(npz_path)  # NPZ has flake_ids 0..99 only.
+
+        # Selector includes domain_ids 0..99 (all in NPZ) plus 200..204 (NOT in NPZ).
+        all_ids = np.concatenate(
+            [np.arange(100, dtype=np.int64), np.arange(200, 205, dtype=np.int64)]
+        )
+        df = pd.DataFrame({"domain_id": all_ids, "selected": [True] * len(all_ids)})
+        df.to_parquet(sel_path, engine="pyarrow", index=False)
+
+        seed_groups = [
+            {"name": "dark", "domain_ids": [0, 1, 2]},
+            {"name": "light", "domain_ids": [50, 51, 52]},
+        ]
+        result = run_clustering(
+            npz_path,
+            sel_path,
+            seed_groups,
+            output_dir=out_dir,
+            rgb_threshold=0.5,
+        )
+        # 5 selected ids were not in the NPZ → counted, dropped, run continues.
+        assert result["n_dropped_selected_ids"] == 5
+        assert result["n_dropped_seed_ids"] == 0
+        assert result["n_clusters"] == 2
+
+
+def test_run_clustering_labels_json_schema():
+    """labels.json conforms to the plan v1 r7 §7.1 frozen schema."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        npz_path = tmp / "stats.npz"
+        sel_path = tmp / "selection.parquet"
+        out_dir = tmp / "clustering_out"
+
+        _make_two_blob_npz(npz_path)
+        _make_all_selected_parquet(sel_path, n=100)
+
+        seed_groups = [
+            {"name": "graphite", "domain_ids": [0, 1, 2]},
+            {"name": "h-bn", "domain_ids": [50, 51, 52]},
+        ]
+        run_clustering(
+            npz_path,
+            sel_path,
+            seed_groups,
+            output_dir=out_dir,
+            rgb_threshold=0.5,
+        )
+
+        payload = json.loads((out_dir / "labels.json").read_text())
+
+        # Top-level required keys.
+        required = {
+            "version",
+            "n_clusters",
+            "groups",
+            "assignments",
+            "thresholds",
+            "noise_label",
+            "random_state",
+            "fitted_at",
+        }
+        assert required <= set(payload.keys()), (
+            f"missing required top-level keys: {required - set(payload.keys())}"
+        )
+
+        # Field types and values.
+        assert payload["version"] == 1
+        assert payload["n_clusters"] == 2
+        assert payload["noise_label"] == -1
+        assert payload["random_state"] == 42
+
+        # fitted_at: ISO 8601 UTC zulu format.
+        assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", payload["fitted_at"])
+
+        # groups: list of {id, name, size, mean_rgb}.
+        assert isinstance(payload["groups"], list)
+        assert len(payload["groups"]) == 2
+        for grp in payload["groups"]:
+            assert set(grp.keys()) == {"id", "name", "size", "mean_rgb"}
+            assert isinstance(grp["id"], int)
+            assert isinstance(grp["name"], str)
+            assert isinstance(grp["size"], int)
+            assert isinstance(grp["mean_rgb"], list)
+            assert len(grp["mean_rgb"]) == 3
+            assert all(isinstance(v, float) for v in grp["mean_rgb"])
+
+        # Group names propagated from seed_groups.
+        names = {g["name"] for g in payload["groups"]}
+        assert names == {"graphite", "h-bn"}
+
+        # assignments: dict[str(domain_id) -> int(cluster_label)].
+        assert isinstance(payload["assignments"], dict)
+        for k, v in payload["assignments"].items():
+            assert isinstance(k, str) and k.lstrip("-").isdigit()
+            assert isinstance(v, int) and v >= 0  # noise excluded from assignments
+
+        # thresholds: dict[str(cluster_id) -> float].
+        assert isinstance(payload["thresholds"], dict)
+        assert set(payload["thresholds"].keys()) == {"0", "1"}
+        for v in payload["thresholds"].values():
+            assert isinstance(v, float)

@@ -4,7 +4,7 @@ Wraps ``flake_core.clustering.engine.InteractiveClusteringEngine`` with file
 I/O — loads the per-domain stats NPZ + selector parquet, narrows to the
 selected domains, fits a seed-initialized GMM, and persists the result as:
 
-  * ``labels.json``        — top-level metadata (counts, n_clusters, params)
+  * ``labels.json``        — frozen interop schema (plan v1 r7 §7.1)
   * ``assignments.parquet`` — per-domain cluster assignment + max posterior
   * ``gmm_model.pkl``       — pickled ``InteractiveClusterResult``
                               (means, covariances, weights, thresholds)
@@ -18,15 +18,23 @@ Plan v1 r6 D6.2 (positional-index adapter):
     *positional* row index in the selector-narrowed array. This wrapper
     converts ``domain_ids`` -> positional indices before calling
     ``engine.fit``. Domain ids missing from the selected subset are
-    skipped with a warning rather than aborting the run.
+    counted in ``n_dropped_seed_ids`` and skipped with a warning rather
+    than aborting the run.
+
+Plan v1 r7:
+    * Diagnostic counters ``n_dropped_seed_ids`` and
+      ``n_dropped_selected_ids`` are returned in the summary dict so the
+      caller can detect mapping fallout.
+    * ``labels.json`` schema frozen per plan §7.1 (interop contract).
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import pickle
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Union
+from typing import Any, Dict, List, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -48,39 +56,45 @@ def _hash_params(params: Dict[str, Any]) -> str:
 def _build_positional_seed_groups(
     seed_groups: Sequence[Dict[str, Any]],
     selected_domain_ids: np.ndarray,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], int]:
     """Convert domain_id-based seed groups to positional indices.
 
     ``selected_domain_ids`` is the array (already filtered to ``selected==True``)
     in the same order as the rows fed to the engine. We map each
     ``domain_id`` -> its positional row.
+
+    Returns
+    -------
+    (positional_groups, n_dropped_seed_ids)
+        ``n_dropped_seed_ids`` is the total count of seed-group
+        ``domain_id``s that were not present in the selected subset
+        (across all groups).
     """
     id_to_pos = {int(did): int(pos) for pos, did in enumerate(selected_domain_ids)}
 
     out: List[Dict[str, Any]] = []
+    n_dropped_seed_ids = 0
     for grp in seed_groups:
         name = grp.get("name", f"group_{len(out)}")
         domain_ids = grp.get("domain_ids", grp.get("indices", []))
         positions: List[int] = []
-        missing: List[int] = []
         for did in domain_ids:
             pos = id_to_pos.get(int(did))
             if pos is None:
-                missing.append(int(did))
+                n_dropped_seed_ids += 1
+                msg.warning(
+                    f"[run_clustering] domain_id {int(did)} in seed group "
+                    f"'{name}' is not in selector — dropped"
+                )
             else:
                 positions.append(pos)
-        if missing:
-            msg.warning(
-                f"[pipeline.clustering] seed group '{name}': "
-                f"{len(missing)} domain_id(s) not in selected subset, skipping"
-            )
         if not positions:
             raise ValueError(
                 f"seed group '{name}' has no valid domain_ids in the "
                 f"selected subset"
             )
         out.append({"name": name, "indices": positions, "domain_ids": list(domain_ids)})
-    return out
+    return out, n_dropped_seed_ids
 
 
 def run_clustering(
@@ -157,27 +171,35 @@ def run_clustering(
 
     # Build domain_id -> position-in-NPZ map, then narrow to selected.
     id_to_npz_pos = {int(did): pos for pos, did in enumerate(flake_ids_all)}
+    npz_id_set = set(id_to_npz_pos.keys())
     selected_mask = selection_df["selected"].astype(bool).to_numpy()
     selected_domain_ids = selection_df.loc[selected_mask, "domain_id"].astype(int).to_numpy()
 
     if selected_domain_ids.size == 0:
         raise ValueError("selection parquet contains zero selected domains")
 
-    npz_positions = np.array(
-        [id_to_npz_pos[int(did)] for did in selected_domain_ids if int(did) in id_to_npz_pos],
-        dtype=np.int64,
-    )
-    if npz_positions.size != selected_domain_ids.size:
-        # Some selected domain_ids were not present in the stats NPZ.
-        # Drop them and keep the bookkeeping consistent.
-        kept = np.array(
-            [int(did) in id_to_npz_pos for did in selected_domain_ids], dtype=bool
+    # Diagnostic: count selected domain_ids missing from the stats NPZ.
+    n_dropped_selected_ids = 0
+    npz_positions_list: List[int] = []
+    kept_selected_ids: List[int] = []
+    for did in selected_domain_ids:
+        did_int = int(did)
+        if did_int in npz_id_set:
+            npz_positions_list.append(id_to_npz_pos[did_int])
+            kept_selected_ids.append(did_int)
+        else:
+            n_dropped_selected_ids += 1
+            msg.warning(
+                f"[run_clustering] selected domain_id {did_int} not in stats NPZ — dropped"
+            )
+
+    npz_positions = np.array(npz_positions_list, dtype=np.int64)
+    selected_domain_ids = np.array(kept_selected_ids, dtype=np.int64)
+
+    if selected_domain_ids.size == 0:
+        raise ValueError(
+            "all selected domain_ids missing from stats NPZ; nothing to cluster"
         )
-        msg.warning(
-            f"[pipeline.clustering] {(~kept).sum()} selected domain_id(s) "
-            f"missing from stats NPZ; dropping"
-        )
-        selected_domain_ids = selected_domain_ids[kept]
 
     repr_rgbs_sel = repr_rgbs_all[npz_positions]
     msg.info(
@@ -185,7 +207,9 @@ def run_clustering(
     )
 
     # --- Positional-index adapter (D6.2) ---------------------------------
-    positional_groups = _build_positional_seed_groups(seed_groups, selected_domain_ids)
+    positional_groups, n_dropped_seed_ids = _build_positional_seed_groups(
+        seed_groups, selected_domain_ids
+    )
     seed_indices_only = [grp["indices"] for grp in positional_groups]
 
     # --- Fit GMM ---------------------------------------------------------
@@ -212,18 +236,51 @@ def run_clustering(
     n_assigned = int((result.labels >= 0).sum())
     n_unassigned = int((result.labels == -1).sum())
 
+    # --- labels.json (frozen schema per plan v1 r7 §7.1) -----------------
+    # Mean RGB per cluster, computed on the assigned (label >= 0) subset.
+    cluster_centers = result.cluster_centers
+    thresholds_list = (
+        list(result.thresholds)
+        if result.thresholds is not None
+        else [float(rgb_threshold)] * int(result.n_clusters)
+    )
+    groups_payload: List[Dict[str, Any]] = []
+    for cid in range(int(result.n_clusters)):
+        member_mask = result.labels == cid
+        size = int(member_mask.sum())
+        center = cluster_centers[cid]
+        groups_payload.append(
+            {
+                "id": cid,
+                "name": positional_groups[cid]["name"]
+                if cid < len(positional_groups)
+                else f"group_{cid}",
+                "size": size,
+                "mean_rgb": [float(center[0]), float(center[1]), float(center[2])],
+            }
+        )
+
+    # assignments: keys are domain_id (string), values are cluster label.
+    # Unassigned (-1) entries are excluded — noise_label captures the sentinel.
+    assignments_payload: Dict[str, int] = {
+        str(int(did)): int(lab)
+        for did, lab in zip(selected_domain_ids, result.labels)
+        if int(lab) >= 0
+    }
+
+    thresholds_payload: Dict[str, float] = {
+        str(cid): float(thresholds_list[cid]) for cid in range(int(result.n_clusters))
+    }
+
     labels_payload = {
+        "version": 1,
         "n_clusters": int(result.n_clusters),
-        "n_selected": int(repr_rgbs_sel.shape[0]),
-        "n_assigned": n_assigned,
-        "n_unassigned": n_unassigned,
-        "rgb_threshold": float(rgb_threshold),
-        "thresholds": list(result.thresholds) if result.thresholds is not None else None,
-        "cluster_centers": result.cluster_centers.tolist(),
-        "groups": [
-            {"name": grp["name"], "domain_ids": grp["domain_ids"]}
-            for grp in positional_groups
-        ],
+        "groups": groups_payload,
+        "assignments": assignments_payload,
+        "thresholds": thresholds_payload,
+        "noise_label": -1,
+        "random_state": 42,
+        "fitted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     labels_path = output_dir / "labels.json"
     labels_path.write_text(json.dumps(labels_payload, indent=2))
@@ -235,7 +292,9 @@ def run_clustering(
     msg.info(
         f"[pipeline.clustering] wrote labels={labels_path.name} "
         f"assignments={assignments_path.name} gmm={gmm_path.name} "
-        f"(assigned={n_assigned}, unassigned={n_unassigned})"
+        f"(assigned={n_assigned}, unassigned={n_unassigned}, "
+        f"dropped_seed_ids={n_dropped_seed_ids}, "
+        f"dropped_selected_ids={n_dropped_selected_ids})"
     )
 
     params: Dict[str, Any] = {
@@ -254,6 +313,8 @@ def run_clustering(
         "n_clusters": int(result.n_clusters),
         "n_assigned": n_assigned,
         "n_unassigned": n_unassigned,
+        "n_dropped_seed_ids": n_dropped_seed_ids,
+        "n_dropped_selected_ids": n_dropped_selected_ids,
         "params": params,
         "params_hash": _hash_params(params),
     }

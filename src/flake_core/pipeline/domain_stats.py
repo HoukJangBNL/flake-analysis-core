@@ -1,9 +1,9 @@
 """Thin wrapper for per-domain color stats compute.
 
 Replaces Qpress's ``flake_stats_operation.py`` logic without DB / Operation /
-Context. Loads annotations + raw images (+ optional pre-computed background)
+Context. Loads annotations + raw images + a mandatory pre-computed background
 and writes a single ``stats.npz`` artifact whose schema matches Qpress's
-``flake_stats_<bg_mode>_<repr_mode>.npz`` exactly:
+``flake_stats_median_<repr_mode>.npz`` exactly:
 
   * ``repr_rgbs``  shape (N, 3) float64
   * ``std_pcts``   shape (N, 3) float64
@@ -12,13 +12,19 @@ and writes a single ``stats.npz`` artifact whose schema matches Qpress's
 
 Output is reordered to match the input flakes list (deterministic for a
 given annotations + raw image set).
+
+Plan v1 r7:
+  * ``bg_mode`` parameter removed — median-mode only.
+  * ``output_path`` parameter removed — NPZ is always written to
+    ``<analysis_folder>/02_domain_stats/stats.npz``.
+  * ``background_path`` is mandatory.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Union
 
 import numpy as np
 from PIL import Image
@@ -39,14 +45,13 @@ def _hash_params(params: Dict[str, Any]) -> str:
 def run_domain_stats(
     annotations_path: Union[str, Path],
     raw_images_dir: Union[str, Path],
+    background_path: Union[str, Path],
     *,
-    output_path: Union[str, Path],
-    background_path: Optional[Union[str, Path]] = None,
-    bg_mode: str = "median",
+    analysis_folder: Union[str, Path],
     repr_mode: str = "median",
     raw_ext: str = ".png",
 ) -> Dict[str, Any]:
-    """Compute per-domain color stats and write a single NPZ.
+    """Compute per-domain color stats and write the NPZ artifact.
 
     Parameters
     ----------
@@ -57,15 +62,13 @@ def run_domain_stats(
     raw_images_dir : str | Path
         Directory containing raw PNGs whose stems match
         ``annotations.images[].file_name`` stems.
-    output_path : str | Path
-        Destination NPZ file. Parent directory is created if missing.
-    background_path : str | Path | None, optional
-        Pre-computed background image (PNG or NPY) to use for vignetting
-        correction. If provided, ``bg_mode`` is forced to ``"median"`` and
-        the supplied image overrides on-disk lookups.
-    bg_mode : str, optional
-        ``"median"`` (vignetting correction) or ``"raw"`` (no correction).
-        Default ``"median"``.
+    background_path : str | Path
+        Pre-computed background image (PNG or NPY) used for median-mode
+        vignetting correction. **Mandatory** as of plan v1 r7.
+    analysis_folder : str | Path
+        Root folder for the analysis artifacts. Output NPZ is written to
+        ``<analysis_folder>/02_domain_stats/stats.npz`` (parent created if
+        missing).
     repr_mode : str, optional
         ``"median"`` (default, robust) or ``"mean"``.
     raw_ext : str, optional
@@ -76,20 +79,41 @@ def run_domain_stats(
     dict
         Summary including ``output_path``, ``num_flakes``, ``params``,
         ``params_hash``.
+
+    Raises
+    ------
+    ValueError
+        When ``background_path`` is ``None`` (plan v1 r7 makes background
+        mandatory in median-only mode).
+    FileNotFoundError
+        When the resolved ``background_path`` does not exist on disk.
     """
-    if bg_mode not in ("raw", "median"):
-        raise ValueError(f"bg_mode must be 'raw' or 'median', got {bg_mode!r}")
+    if background_path is None:
+        raise ValueError(
+            "background_path is required (median-only mode in r7)"
+        )
     if repr_mode not in ("median", "mean"):
         raise ValueError(f"repr_mode must be 'median' or 'mean', got {repr_mode!r}")
 
     annotations_path = Path(annotations_path)
     raw_images_dir = Path(raw_images_dir)
-    output_path = Path(output_path)
+    background_path = Path(background_path)
+    analysis_folder = Path(analysis_folder)
+
+    if not background_path.exists():
+        raise FileNotFoundError(
+            f"background_path does not exist: {background_path} "
+            f"(median-only mode in r7 requires a pre-computed background)"
+        )
+
+    # Hardcoded output path: <analysis_folder>/02_domain_stats/stats.npz
+    output_path = analysis_folder / "02_domain_stats" / "stats.npz"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     msg.info(
         f"[pipeline.domain_stats] start ann={annotations_path} "
-        f"raw={raw_images_dir} out={output_path} "
-        f"bg_mode={bg_mode} repr_mode={repr_mode}"
+        f"raw={raw_images_dir} bg={background_path} "
+        f"out={output_path} repr_mode={repr_mode}"
     )
 
     # --- Resolve annotations layout --------------------------------------
@@ -124,31 +148,21 @@ def run_domain_stats(
     flakes = load_flakes_from_annotations(cache, raw_images_dir, raw_ext=raw_ext)
     msg.info(f"[pipeline.domain_stats] loaded {len(flakes)} flakes")
 
-    # --- Optional explicit background image ------------------------------
-    background_image: Optional[np.ndarray] = None
-    if background_path is not None:
-        bg_path = Path(background_path)
-        if not bg_path.exists():
-            raise FileNotFoundError(f"background_path not found: {bg_path}")
-        if bg_path.suffix.lower() == ".npy":
-            background_image = np.load(bg_path).astype(np.float64)
-        else:
-            background_image = np.array(Image.open(bg_path)).astype(np.float64)
-        msg.info(f"[pipeline.domain_stats] using background from {bg_path}")
-        # Per Qpress flake_stats_operation.py: explicit background forces
-        # bg_mode=median (so the per-pixel division branch runs).
-        bg_mode = "median"
+    # --- Load explicit background image ----------------------------------
+    if background_path.suffix.lower() == ".npy":
+        background_image = np.load(background_path).astype(np.float64)
+    else:
+        background_image = np.array(Image.open(background_path)).astype(np.float64)
+    msg.info(f"[pipeline.domain_stats] using background from {background_path}")
 
     # --- Compute (writes Qpress-compatible NPZ inside cache_dir) ---------
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     cache_dir = output_path.parent
 
-    raw_image_folder = raw_images_dir if bg_mode == "median" and background_image is None else raw_images_dir
     result = compute_and_cache_stats_from_flakes(
         flakes=flakes,
         cache_dir=cache_dir,
-        raw_image_folder=raw_image_folder,
-        background_mode=bg_mode,
+        raw_image_folder=raw_images_dir,
+        background_mode="median",  # Plan v1 r7: median-only
         representative_mode=repr_mode,
         force_recompute=True,  # wrapper always writes fresh artifact
         raw_ext=raw_ext,
@@ -156,10 +170,9 @@ def run_domain_stats(
     )
 
     # ``compute_and_cache_stats_from_flakes`` writes
-    #   cache_dir/flake_stats_<bg>_<repr>.npz
-    # which may not match the user's requested output_path. Resolve by
-    # writing the canonical artifact at output_path explicitly so the
-    # caller-specified filename is honored.
+    #   cache_dir/flake_stats_median_<repr>.npz
+    # which does not match the user's hardcoded output_path. Resolve by
+    # writing the canonical artifact at output_path explicitly.
     flake_ids = np.array([f.flake_id for f in flakes], dtype=np.int64)
     np.savez(
         output_path,
@@ -175,8 +188,8 @@ def run_domain_stats(
     params: Dict[str, Any] = {
         "annotations_path": str(annotations_path),
         "raw_images_dir": str(raw_images_dir),
-        "background_path": str(background_path) if background_path else None,
-        "bg_mode": bg_mode,
+        "background_path": str(background_path),
+        "analysis_folder": str(analysis_folder),
         "repr_mode": repr_mode,
         "raw_ext": raw_ext,
     }

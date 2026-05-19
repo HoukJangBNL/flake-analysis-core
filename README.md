@@ -1,61 +1,36 @@
-# flake-analysis-core
+# flake-analysis-core (DEPRECATED)
 
-Algorithm core for 2D material flake microscopy analysis.
+**This repository has been merged into [stand-alone-analyzer](https://github.com/HoukJangBNL/stand-alone-analyzer).**
 
-Extracted from the [Qpress](https://github.com/HoukJangBNL/Qpress) hardware-control system into a standalone, reusable package. Used by [stand-alone-analyzer](https://github.com/HoukJangBNL/stand-alone-analyzer) (Streamlit GUI).
+The algorithm core that used to live here is now at
+`stand-alone-analyzer/src/flake_analysis/core/` as of stand-alone-analyzer
+v0.2.0 (2026-05-18).
 
-## Status
+## Why the merge?
 
-`v0.1.0` — alpha. APIs may change between minor versions.
+Original split was based on plan v1 r1-r6's "(c) shared package" strategy
+where Qpress and the standalone tool would both import this package.
+Plan r8 reverted that decision ("(a) plain copy" — Qpress unchanged).
+A separate package was no longer necessary.
 
-## What it provides
-
-- **Annotations IO** — COCO + RLE flake mask loading (`flake_core.annotations`)
-- **Image processing** — median background generation (with reproducibility seed) + mask pair distance + union-find flake construction (`flake_core.image_processing`)
-- **Color classification** — per-domain color stats computation (`flake_core.color_classification`)
-- **Manual seed-group GMM clustering** (`flake_core.clustering`)
-- **Function-style pipeline wrappers** — `flake_core.pipeline.{background, domain_stats, domain_proximity, selector, clustering}`
-
-No DB, no SSH, no GUI dependencies. Pure Python + numpy + scipy + sklearn + opencv + pycocotools + Pillow.
-
-## Install
-
-```bash
-git clone https://github.com/HoukJangBNL/flake-analysis-core.git
-cd flake-analysis-core
-pip install -e ".[dev]"
-pytest -v
-```
-
-## Quick example
+## Migration
 
 ```python
+# OLD
 from flake_core.pipeline.background import run_background
-from flake_core.pipeline.domain_stats import run_domain_stats
 
-# Generate median background from raw images (reproducible with seed)
-result = run_background(
-    raw_images_dir="/path/to/raw_images",
-    output_path="/path/to/analysis/01_background/background.npy",
-    seed=0,
-    max_images=100,
-)
-
-# Compute per-domain RGB stats
-stats = run_domain_stats(
-    annotations_path="/path/to/annotations.json",
-    raw_images_dir="/path/to/raw_images",
-    background_path="/path/to/analysis/01_background/background.npy",
-    analysis_folder="/path/to/analysis",
-)
+# NEW
+from flake_analysis.core.pipeline.background import run_background
 ```
 
-See [stand-alone-analyzer](https://github.com/HoukJangBNL/stand-alone-analyzer) for a full Streamlit GUI on top of these functions.
+## What if you depend on this package?
 
-## License
+Install the new package:
 
-MIT — see [LICENSE](LICENSE).
+```bash
+git clone https://github.com/HoukJangBNL/stand-alone-analyzer
+pip install -e stand-alone-analyzer
+```
 
-## Acknowledgements
-
-Algorithms adapted from the Qpress analyzer module (BNL/CFN). Credit to the Qpress contributors.
+The last release of this standalone package was `v0.2.0`. No further
+releases will be published from this repo.
